@@ -1,4 +1,4 @@
-import { loadDashboard } from "./lib/ysa/queries";
+import { loadDashboard } from "./lib/ysa/queries.ts";
 
 async function run() {
   const data = await loadDashboard();
