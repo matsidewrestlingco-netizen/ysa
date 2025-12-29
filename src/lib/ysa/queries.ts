@@ -107,6 +107,30 @@ export async function denyAccessRequest(requestId: string) {
   return true;
 }
 
+export async function updateMemberRole(userId: string, role: string) {
+  const res = await supabase
+    .schema(YSA_SCHEMA)
+    .from("org_members")
+    .update({ role })
+    .eq("org_id", ORG_ID)
+    .eq("user_id", userId);
+
+  if (res.error) throw res.error;
+  return true;
+}
+
+export async function removeMember(userId: string) {
+  const res = await supabase
+    .schema(YSA_SCHEMA)
+    .from("org_members")
+    .delete()
+    .eq("org_id", ORG_ID)
+    .eq("user_id", userId);
+
+  if (res.error) throw res.error;
+  return true;
+}
+
 export async function loadDashboard() {
   const roster = await supabase
     .schema(YSA_SCHEMA)
