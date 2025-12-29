@@ -259,6 +259,19 @@ async function renderApp() {
 }
 
 // Boot
-renderApp();
-window.addEventListener("hashchange", () => renderApp());
-supabase.auth.onAuthStateChange(() => renderApp());
+app.innerHTML = "<h1>YSA</h1><p>Loading…</p>";
+
+renderApp().catch((err: any) => {
+  console.error(err);
+  app.innerHTML = `<h1>YSA</h1><pre style="color:#b00; white-space:pre-wrap;">${
+    escapeHtml(err?.message || String(err))
+  }</pre>`;
+});
+
+window.addEventListener("hashchange", () => {
+  renderApp().catch(console.error);
+});
+
+supabase.auth.onAuthStateChange(() => {
+  renderApp().catch(console.error);
+});
