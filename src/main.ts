@@ -41,7 +41,6 @@ function renderError(title: string, err: any) {
 
 function formatDate(d: string | null | undefined) {
   if (!d) return "";
-  // Handles both YYYY-MM-DD and ISO timestamps
   const dt = new Date(d);
   if (!isNaN(dt.getTime())) return dt.toLocaleString();
   return d;
@@ -292,6 +291,19 @@ async function renderAdminView() {
 }
 
 async function renderAthleteView(athleteId: string) {
+  // Load saved filters (per athlete)
+  const filterKey = `ysa_filters_${athleteId}`;
+  let saved: any = {};
+  try {
+    saved = JSON.parse(sessionStorage.getItem(filterKey) || "{}");
+  } catch {
+    saved = {};
+  }
+
+  const savedStatus = saved.status ?? "all";
+  const savedCriticalOnly = !!saved.criticalOnly;
+  const savedSearch = saved.search ?? "";
+
   // Use roster for name/grade/level (simple and fast)
   const dash = await loadDashboard();
   const athlete = dash.roster.find((a: any) => a.athlete_id === athleteId);
@@ -300,7 +312,6 @@ async function renderAthleteView(athleteId: string) {
 
   const criticalTotal = checklist.filter((x) => x.critical).length;
   const criticalComplete = checklist.filter((x) => x.critical && x.status === "complete").length;
-  const criticalIncomplete = criticalTotal - criticalComplete;
 
   const statusCounts = {
     complete: checklist.filter((x) => x.status === "complete").length,
@@ -341,6 +352,36 @@ async function renderAthleteView(athleteId: string) {
     </div>
 
     <hr style="margin:12px 0;" />
+
+    <!-- Filters -->
+    <div id="athleteFilters" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:12px 0;">
+      <label style="display:flex; flex-direction:column; gap:4px; font-size:12px; color:#555;">
+        Status
+        <select id="filterStatus" style="padding:8px; min-width:180px;">
+          <option value="all" ${savedStatus === "all" ? "selected" : ""}>All</option>
+          <option value="missing" ${savedStatus === "missing" ? "selected" : ""}>Missing</option>
+          <option value="pending" ${savedStatus === "pending" ? "selected" : ""}>Pending</option>
+          <option value="complete" ${savedStatus === "complete" ? "selected" : ""}>Complete</option>
+        </select>
+      </label>
+
+      <label style="display:flex; align-items:center; gap:8px; margin-top:18px;">
+        <input id="filterCriticalOnly" type="checkbox" ${savedCriticalOnly ? "checked" : ""} />
+        <span style="font-size:14px;">Critical only</span>
+      </label>
+
+      <label style="display:flex; flex-direction:column; gap:4px; font-size:12px; color:#555; flex:1; min-width:260px;">
+        Search
+        <input id="filterSearch" type="text" value="${escapeHtml(
+          savedSearch
+        )}" placeholder="Search requirement or category…" style="padding:8px; width:100%;" />
+      </label>
+
+      <button id="clearFilters" style="margin-top:18px; padding:8px 10px; border-radius:8px; border:1px solid #ddd; cursor:pointer;">
+        Clear
+      </button>
+    </div>
+
     <div id="athleteSaveStatus" style="margin-bottom:10px;"></div>
   `;
 
@@ -359,8 +400,15 @@ async function renderAthleteView(athleteId: string) {
 
       const criticalChip = it.critical ? badge("CRITICAL", "#fee2e2") : "";
 
+      const haystack = `${it.name} ${it.category}`.toLowerCase();
+
       return `
-        <tr id="${escapeHtml(rowId)}">
+        <tr
+          id="${escapeHtml(rowId)}"
+          data-status="${escapeHtml(it.status)}"
+          data-critical="${it.critical ? "1" : "0"}"
+          data-haystack="${escapeHtml(haystack)}"
+        >
           <td style="border-bottom:1px solid #f0f0f0; padding:10px;">
             <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
               <strong>${escapeHtml(it.name)}</strong>
@@ -546,8 +594,9 @@ async function renderApp() {
       });
     }
 
-    // Wire Athlete save buttons (if present)
+    // Wire Athlete save buttons + Filters (if present)
     if (route.name === "athlete" && route.athleteId && athleteChecklistCache) {
+      // Save buttons
       document.querySelectorAll<HTMLButtonElement>("button[data-save-req]").forEach((btn) => {
         btn.onclick = async () => {
           const requirementId = btn.getAttribute("data-save-req")!;
@@ -582,6 +631,47 @@ async function renderApp() {
           }
         };
       });
+
+      // ---- Filters wiring ----
+      const filterKey = `ysa_filters_${route.athleteId}`;
+
+      const statusSel = document.querySelector<HTMLSelectElement>("#filterStatus");
+      const critOnly = document.querySelector<HTMLInputElement>("#filterCriticalOnly");
+      const searchBox = document.querySelector<HTMLInputElement>("#filterSearch");
+      const clearBtn = document.querySelector<HTMLButtonElement>("#clearFilters");
+
+      const applyFilters = () => {
+        const status = statusSel?.value || "all";
+        const criticalOnly = !!critOnly?.checked;
+        const search = (searchBox?.value || "").trim().toLowerCase();
+
+        sessionStorage.setItem(filterKey, JSON.stringify({ status, criticalOnly, search }));
+
+        document.querySelectorAll<HTMLTableRowElement>('tr[id^="row-"]').forEach((tr) => {
+          const rowStatus = tr.getAttribute("data-status") || "";
+          const rowCritical = tr.getAttribute("data-critical") === "1";
+          const hay = (tr.getAttribute("data-haystack") || "").toLowerCase();
+
+          const matchesStatus = status === "all" ? true : rowStatus === status;
+          const matchesCritical = criticalOnly ? rowCritical : true;
+          const matchesSearch = search ? hay.includes(search) : true;
+
+          tr.style.display = matchesStatus && matchesCritical && matchesSearch ? "" : "none";
+        });
+      };
+
+      statusSel?.addEventListener("change", applyFilters);
+      critOnly?.addEventListener("change", applyFilters);
+      searchBox?.addEventListener("input", applyFilters);
+
+      clearBtn?.addEventListener("click", () => {
+        if (statusSel) statusSel.value = "all";
+        if (critOnly) critOnly.checked = false;
+        if (searchBox) searchBox.value = "";
+        applyFilters();
+      });
+
+      applyFilters();
     }
   } catch (err: any) {
     renderError("YSA", err);
