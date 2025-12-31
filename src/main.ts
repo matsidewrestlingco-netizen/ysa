@@ -9,6 +9,8 @@ import {
   denyAccessRequest,
   updateMemberRole,
   removeMember,
+  loadAthleteChecklist,
+  upsertAthleteRequirementStatus,
 } from "./lib/ysa/queries";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -35,6 +37,20 @@ function layout(title: string, bodyHtml: string) {
 function renderError(title: string, err: any) {
   const msg = err?.message || String(err);
   layout(title, `<pre style="color:#b00; white-space:pre-wrap;">${escapeHtml(msg)}</pre>`);
+}
+
+function formatDate(d: string | null | undefined) {
+  if (!d) return "";
+  // Handles both YYYY-MM-DD and ISO timestamps
+  const dt = new Date(d);
+  if (!isNaN(dt.getTime())) return dt.toLocaleString();
+  return d;
+}
+
+function badge(text: string, bg: string) {
+  return `<span style="display:inline-block; padding:2px 8px; border-radius:999px; background:${bg}; font-size:12px;">${escapeHtml(
+    text
+  )}</span>`;
 }
 
 async function renderLogin(message = "") {
@@ -152,6 +168,7 @@ async function renderDashboardView() {
     </ul>
 
     <h2 style="margin:18px 0 8px;">Roster</h2>
+    <p style="color:#555; margin-top:0;">Click an athlete to open their checklist.</p>
     <table style="border-collapse: collapse; width: 100%;">
       <thead>
         <tr>
@@ -165,8 +182,12 @@ async function renderDashboardView() {
         ${roster
           .map(
             (a: any) => `
-          <tr>
-            <td style="border-bottom:1px solid #f0f0f0; padding:8px;">${escapeHtml(a.last_name)}, ${escapeHtml(a.first_name)}</td>
+          <tr data-athlete="${escapeHtml(a.athlete_id)}" style="cursor:pointer;">
+            <td style="border-bottom:1px solid #f0f0f0; padding:8px;">
+              <a href="#athlete/${escapeHtml(a.athlete_id)}">${escapeHtml(a.last_name)}, ${escapeHtml(
+              a.first_name
+            )}</a>
+            </td>
             <td style="border-bottom:1px solid #f0f0f0; padding:8px;">${escapeHtml(a.grade)}</td>
             <td style="border-bottom:1px solid #f0f0f0; padding:8px;">${escapeHtml(a.team_level)}</td>
             <td style="border-bottom:1px solid #f0f0f0; padding:8px;">${escapeHtml(a.play_status)}</td>
@@ -212,8 +233,7 @@ async function renderAdminView() {
                 <td style="border-bottom:1px solid #f0f0f0; padding:8px;">
                   <select id="${escapeHtml(selectId)}">
                     ${ROLE_OPTIONS.map(
-                      (r) =>
-                        `<option value="${r}" ${m.role === r ? "selected" : ""}>${r}</option>`
+                      (r) => `<option value="${r}" ${m.role === r ? "selected" : ""}>${r}</option>`
                     ).join("")}
                   </select>
                 </td>
@@ -271,8 +291,157 @@ async function renderAdminView() {
   return membersTable + requestsTable;
 }
 
+async function renderAthleteView(athleteId: string) {
+  // Use roster for name/grade/level (simple and fast)
+  const dash = await loadDashboard();
+  const athlete = dash.roster.find((a: any) => a.athlete_id === athleteId);
+
+  const checklist = await loadAthleteChecklist(athleteId);
+
+  const criticalTotal = checklist.filter((x) => x.critical).length;
+  const criticalComplete = checklist.filter((x) => x.critical && x.status === "complete").length;
+  const criticalIncomplete = criticalTotal - criticalComplete;
+
+  const statusCounts = {
+    complete: checklist.filter((x) => x.status === "complete").length,
+    pending: checklist.filter((x) => x.status === "pending").length,
+    missing: checklist.filter((x) => x.status === "missing").length,
+  };
+
+  const header = `
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+      <div>
+        <div style="font-size:18px; font-weight:700;">
+          ${
+            athlete
+              ? `${escapeHtml(athlete.last_name)}, ${escapeHtml(athlete.first_name)}`
+              : `Athlete ${escapeHtml(athleteId)}`
+          }
+        </div>
+        <div style="color:#555; margin-top:2px;">
+          ${athlete ? `Grade ${escapeHtml(athlete.grade)} • ${escapeHtml(athlete.team_level)}` : ""}
+        </div>
+      </div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <div style="padding:10px; border:1px solid #ddd; border-radius:10px;">
+          <div style="color:#555; font-size:12px;">Critical</div>
+          <div style="font-weight:700;">${criticalComplete}/${criticalTotal} complete</div>
+        </div>
+        <div style="padding:10px; border:1px solid #ddd; border-radius:10px;">
+          <div style="color:#555; font-size:12px;">Totals</div>
+          <div style="font-weight:700;">
+            ${statusCounts.complete} complete • ${statusCounts.pending} pending • ${statusCounts.missing} missing
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:10px;">
+      <a href="#dashboard">← Back to Dashboard</a>
+    </div>
+
+    <hr style="margin:12px 0;" />
+    <div id="athleteSaveStatus" style="margin-bottom:10px;"></div>
+  `;
+
+  const rows = checklist
+    .map((it) => {
+      const rowId = `row-${it.requirement_id}`;
+      const statusId = `status-${it.requirement_id}`;
+      const notesId = `notes-${it.requirement_id}`;
+
+      const statusChip =
+        it.status === "complete"
+          ? badge("complete", "#d1fae5")
+          : it.status === "pending"
+          ? badge("pending", "#fde68a")
+          : badge("missing", "#fecaca");
+
+      const criticalChip = it.critical ? badge("CRITICAL", "#fee2e2") : "";
+
+      return `
+        <tr id="${escapeHtml(rowId)}">
+          <td style="border-bottom:1px solid #f0f0f0; padding:10px;">
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+              <strong>${escapeHtml(it.name)}</strong>
+              ${criticalChip}
+              ${statusChip}
+            </div>
+            <div style="color:#666; font-size:12px; margin-top:4px;">
+              ${escapeHtml(it.category)}${it.due_date ? ` • Due ${escapeHtml(it.due_date)}` : ""}
+            </div>
+            ${
+              it.evidence_file_url
+                ? `<div style="margin-top:6px; font-size:12px;">
+                    Evidence: <a href="${escapeHtml(it.evidence_file_url)}" target="_blank" rel="noreferrer">open</a>
+                  </div>`
+                : ""
+            }
+          </td>
+
+          <td style="border-bottom:1px solid #f0f0f0; padding:10px; width:180px;">
+            <select id="${escapeHtml(statusId)}" style="width:100%; padding:8px;">
+              <option value="missing" ${it.status === "missing" ? "selected" : ""}>missing</option>
+              <option value="pending" ${it.status === "pending" ? "selected" : ""}>pending</option>
+              <option value="complete" ${it.status === "complete" ? "selected" : ""}>complete</option>
+            </select>
+
+            <button
+              data-save-req="${escapeHtml(it.requirement_id)}"
+              style="margin-top:8px; width:100%; padding:8px; border-radius:8px; border:1px solid #ddd; cursor:pointer;"
+            >
+              Save
+            </button>
+
+            <div style="color:#666; font-size:12px; margin-top:8px;">
+              ${it.completed_at ? `Completed: ${escapeHtml(formatDate(it.completed_at))}` : ""}
+              ${it.updated_at ? `<div>Updated: ${escapeHtml(formatDate(it.updated_at))}</div>` : ""}
+            </div>
+          </td>
+
+          <td style="border-bottom:1px solid #f0f0f0; padding:10px;">
+            <textarea
+              id="${escapeHtml(notesId)}"
+              rows="3"
+              style="width:100%; padding:8px;"
+              placeholder="Notes (optional)"
+            >${escapeHtml(it.notes ?? "")}</textarea>
+          </td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  const table = `
+    <table style="border-collapse: collapse; width:100%;">
+      <thead>
+        <tr>
+          <th style="text-align:left; border-bottom:1px solid #ddd; padding:8px;">Requirement</th>
+          <th style="text-align:left; border-bottom:1px solid #ddd; padding:8px; width:180px;">Status</th>
+          <th style="text-align:left; border-bottom:1px solid #ddd; padding:8px;">Notes</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+
+  return { html: header + table, checklist };
+}
+
 let renderInFlight = false;
 let renderQueued = false;
+
+function parseRoute(hash: string) {
+  const raw = hash.replace("#", "").trim();
+  if (!raw) return { name: "dashboard" as const };
+  if (raw === "dashboard") return { name: "dashboard" as const };
+  if (raw === "admin") return { name: "admin" as const };
+  if (raw.startsWith("athlete/")) {
+    const athleteId = raw.split("/")[1];
+    return { name: "athlete" as const, athleteId };
+  }
+  return { name: "dashboard" as const };
+}
 
 async function renderApp() {
   if (renderInFlight) {
@@ -297,16 +466,26 @@ async function renderApp() {
     }
 
     const isAdmin = membership.role === "admin" || membership.role === "president";
-    const route = location.hash.replace("#", "") || "dashboard";
+    const route = parseRoute(location.hash);
 
     const nav = navHtml(isAdmin, userEmail);
 
     let view = "";
-    if (route === "admin") {
+    let athleteChecklistCache: any[] | null = null;
+
+    if (route.name === "admin") {
       if (!isAdmin) {
         view = `<p style="color:#b00;">Not authorized.</p>`;
       } else {
         view = await renderAdminView();
+      }
+    } else if (route.name === "athlete") {
+      if (!route.athleteId) {
+        view = `<p style="color:#b00;">Missing athlete id.</p>`;
+      } else {
+        const out = await renderAthleteView(route.athleteId);
+        view = out.html;
+        athleteChecklistCache = out.checklist;
       }
     } else {
       view = await renderDashboardView();
@@ -321,8 +500,7 @@ async function renderApp() {
     };
 
     // Wire Admin buttons (if present)
-    if (route === "admin" && isAdmin) {
-      // Approve/Deny
+    if (route.name === "admin" && isAdmin) {
       document.querySelectorAll<HTMLButtonElement>("button[data-approve]").forEach((btn) => {
         btn.onclick = async () => {
           const id = btn.getAttribute("data-approve")!;
@@ -346,7 +524,6 @@ async function renderApp() {
         };
       });
 
-      // Save role / Remove member
       document.querySelectorAll<HTMLButtonElement>("button[data-save-role]").forEach((btn) => {
         btn.onclick = async () => {
           const userId = btn.getAttribute("data-save-role")!;
@@ -365,6 +542,44 @@ async function renderApp() {
           if (!confirm("Remove this member?")) return;
           await removeMember(userId);
           await renderApp();
+        };
+      });
+    }
+
+    // Wire Athlete save buttons (if present)
+    if (route.name === "athlete" && route.athleteId && athleteChecklistCache) {
+      document.querySelectorAll<HTMLButtonElement>("button[data-save-req]").forEach((btn) => {
+        btn.onclick = async () => {
+          const requirementId = btn.getAttribute("data-save-req")!;
+          const statusSel = document.querySelector<HTMLSelectElement>(`#status-${requirementId}`);
+          const notesTa = document.querySelector<HTMLTextAreaElement>(`#notes-${requirementId}`);
+          const status = (statusSel?.value || "missing") as any;
+          const notes = notesTa?.value ?? "";
+
+          const info = document.querySelector<HTMLDivElement>("#athleteSaveStatus");
+          if (info) info.innerHTML = `<p style="color:#555;">Saving…</p>`;
+
+          try {
+            // Preserve existing value_* and evidence fields so we don’t wipe them
+            const existing = athleteChecklistCache!.find((x: any) => x.requirement_id === requirementId);
+
+            await upsertAthleteRequirementStatus({
+              athleteId: route.athleteId!,
+              requirementId,
+              status,
+              notes,
+              value_number: existing?.value_number ?? null,
+              value_date: existing?.value_date ?? null,
+              value_text: existing?.value_text ?? null,
+              evidence_file_url: existing?.evidence_file_url ?? null,
+            });
+
+            if (info) info.innerHTML = `<p style="color:#060;">Saved.</p>`;
+            await renderApp(); // re-render to refresh counts and updated timestamps
+          } catch (e: any) {
+            if (info) info.innerHTML = `<p style="color:#b00;">${escapeHtml(e?.message || e)}</p>`;
+            console.error(e);
+          }
         };
       });
     }
